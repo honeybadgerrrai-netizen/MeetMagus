@@ -1,0 +1,143 @@
+# config/models.yaml
+# Provider: Groq free tier — no credit card, no cost
+# All models below are open-source and available on Groq's free plan
+#
+# Free tier limits (relevant models):
+#   llama-3.1-8b-instant       — 30 RPM, 14,400 RPD, 6K TPM, 500K TPD  ← high volume workhorse
+#   llama-3.3-70b-versatile    — 30 RPM,  1,000 RPD, 12K TPM, 100K TPD ← quality tasks
+#   qwen/qwen3-32b             — 60 RPM,  1,000 RPD,  6K TPM, 500K TPD ← reasoning tasks
+#   meta-llama/llama-4-scout   — 30 RPM,  1,000 RPD, 30K TPM, 500K TPD ← long context
+#
+# Embeddings: Groq does not offer an embeddings API.
+# Using sentence-transformers locally (free, no API, runs on CPU).
+# Install: pip install sentence-transformers
+# Model: BAAI/bge-large-en-v1.5 (same as original DeepInfra config, 1024 dims)
+
+providers:
+  groq:
+    base_url: "https://api.groq.com/openai/v1"
+    api_key_env: "GROQ_API_KEY"
+    openai_compatible: true
+
+models:
+
+  extraction:
+    # Job: parse raw SEC filing / news article → structured observation fields
+    # Volume: highest — runs on every ingested document
+    # Need: fast, cheap, instruction-following. Quality matters less than throughput.
+    # Choice: llama-3.1-8b-instant — 560 t/s, 14,400 RPD free. Highest daily headroom.
+    description: "Parse raw content into structured observations"
+    provider: "groq"
+    model: "llama-3.1-8b-instant"
+    max_tokens: 500
+    temperature: 0.1
+    rate_limit_rpm: 30
+    rate_limit_rpd: 14400
+
+  dedup_novelty:
+    # Job: Level 3b — is this signal materially new vs existing observations?
+    # Volume: high — runs on every signal that passes embedding similarity check
+    # Need: yes/no answer, low latency, low token count
+    # Choice: llama-3.1-8b-instant — same reasoning as extraction, generous RPD
+    description: "Level 3b material novelty check"
+    provider: "groq"
+    model: "llama-3.1-8b-instant"
+    max_tokens: 100
+    temperature: 0.0
+    rate_limit_rpm: 30
+    rate_limit_rpd: 14400
+
+  entity_resolution:
+    # Job: given a string like "GS" or "Goldman Sachs Group", suggest canonical match
+    # Volume: medium — runs on new entity strings at ingestion time
+    # Need: accurate matching, structured output
+    # Choice: llama-3.1-8b-instant — fast enough, and entity matching is a simple task
+    description: "Suggest alias matches for entity resolution"
+    provider: "groq"
+    model: "llama-3.1-8b-instant"
+    max_tokens: 200
+    temperature: 0.0
+    rate_limit_rpm: 30
+    rate_limit_rpd: 14400
+
+  pattern_detection:
+    # Job: look across multiple observations and find non-obvious patterns
+    # Volume: low — runs in batch once or twice daily per active prospect
+    # Need: reasoning quality, can handle longer context
+    # Choice: qwen/qwen3-32b — 60 RPM (2x others), strong reasoning, 500K TPD free
+    description: "Detect patterns across observations for a company or person"
+    provider: "groq"
+    model: "qwen/qwen3-32b"
+    max_tokens: 1000
+    temperature: 0.2
+    rate_limit_rpm: 60
+    rate_limit_rpd: 1000
+
+  alert_generation:
+    # Job: compose the banker-facing alert — must be crisp, cited, and high quality
+    # Volume: very low — one alert per trigger event per banker
+    # Need: highest quality output, good prose, structured citations
+    # Choice: llama-3.3-70b-versatile — best open-source model on Groq, 280 t/s
+    description: "Compose banker-facing alert briefings"
+    provider: "groq"
+    model: "llama-3.3-70b-versatile"
+    max_tokens: 2000
+    temperature: 0.3
+    rate_limit_rpm: 30
+    rate_limit_rpd: 1000
+
+  agent_reasoning:
+    # Job: complex multi-step reasoning — warm path scoring, prep brief synthesis,
+    #      deciding which signals to surface and why
+    # Volume: lowest — triggered only when a banker interaction requires deep reasoning
+    # Need: best available reasoning, longer context window
+    # Choice: llama-3.3-70b-versatile — best model available on Groq free tier
+    #         (Groq does not offer 235B models on free tier)
+    description: "Complex multi-step agent reasoning"
+    provider: "groq"
+    model: "llama-3.3-70b-versatile"
+    max_tokens: 4000
+    temperature: 0.2
+    rate_limit_rpm: 30
+    rate_limit_rpd: 1000
+
+  embedding:
+    # Groq does not provide an embeddings API.
+    # Running sentence-transformers locally — free, no rate limits, no API key.
+    # Same model (BAAI/bge-large-en-v1.5) as the original DeepInfra config.
+    # Install: pip install sentence-transformers
+    # The embedding worker loads the model once on startup and runs inference locally.
+    description: "Generate vector embeddings (local, no API)"
+    provider: "local"
+    model: "BAAI/bge-large-en-v1.5"
+    dimensions: 1024
+    device: "cpu"  # change to "cuda" if GPU available
+
+defaults:
+  retry_max: 3
+  retry_delay_seconds: 2
+  timeout_seconds: 30
+  # When hitting 429, back off and retry — Groq resets TPM every 60 seconds
+  backoff_strategy: "exponential"
+  backoff_base_seconds: 5
+
+# ---
+# Free tier daily budget summary (worst case, all tasks running):
+#
+#   extraction + dedup_novelty + entity_resolution → llama-3.1-8b-instant
+#     shared pool: 14,400 RPD / 500K TPD
+#     realistic daily usage (dev): ~200 requests — well within limit
+#
+#   pattern_detection → qwen/qwen3-32b
+#     1,000 RPD / 500K TPD
+#     realistic daily usage (dev): ~20 requests — fine
+#
+#   alert_generation + agent_reasoning → llama-3.3-70b-versatile
+#     1,000 RPD / 100K TPD
+#     realistic daily usage (dev): ~10 requests — fine
+#
+#   embeddings → local sentence-transformers
+#     unlimited, no cost
+#
+# To get a free API key: https://console.groq.com/keys (no credit card required)
+# ---
