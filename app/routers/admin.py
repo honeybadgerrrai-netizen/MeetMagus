@@ -1,7 +1,8 @@
 """Admin seed endpoint — runs demo data load on Railway."""
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
-from app.core.db import SessionLocal
+from app.core.db import GlobalBase, PlatformBase, SessionLocal, engine
+from app.models.tenant.models import TenantBase
 from app.models.global_schema.entities import Affiliation, Company, CompanyRelationship, Person
 from app.models.global_schema.observations import EmployeeObservation, FinancialObservation, InvestorObservation
 from app.models.platform.models import FreshnessPolicy, SourceRegistry
@@ -14,9 +15,14 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def seed_database():
     """Seed demo data. Idempotent."""
     db = SessionLocal()
+        # Drop and recreate all tables to fix schema drift
+        GlobalBase.metadata.drop_all(bind=engine)
+    PlatformBase.metadata.drop_all(bind=engine)
+    TenantBase.metadata.drop_all(bind=engine)
+    GlobalBase.metadata.create_all(bind=engine)
+    PlatformBase.metadata.create_all(bind=engine)
+    TenantBase.metadata.create_all(bind=engine)
     try:
-        if db.query(Company).count() > 0:
-            return {"status": "already_seeded", "companies": db.query(Company).count()}
         db.add_all([
             SourceRegistry(source_id="sec_edgar", display_name="SEC EDGAR", source_type="sec_filing", can_store_raw=True, can_display_to_user=True, reliability_rank=1, dedup_threshold=0.95),
             SourceRegistry(source_id="news_feed", display_name="News Feed", source_type="news", can_store_raw=True, can_display_to_user=True, reliability_rank=4, dedup_threshold=0.90),
