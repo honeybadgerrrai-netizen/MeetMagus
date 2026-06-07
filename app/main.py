@@ -23,7 +23,7 @@ import app.models.tenant.models  # noqa
 from app.core.db import GlobalBase, PlatformBase, SessionLocal, engine
 from app.models.tenant.models import TenantBase
 from app.routers import (
-    alerts, capabilities, companies, contacts,
+    admin, alerts, capabilities, companies, contacts,
     ingestion, notes, observations, people, warm_paths,
 )
 
@@ -96,6 +96,9 @@ app.include_router(capabilities.router)
 app.include_router(notes.router)
 app.include_router(alerts.router)
 app.include_router(warm_paths.router)
+
+# Admin
+app.include_router(admin.router)
 
 # Ingestion
 app.include_router(ingestion.router)
