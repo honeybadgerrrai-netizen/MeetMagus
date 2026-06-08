@@ -283,7 +283,7 @@ class Extractor:
             elif actual_type == "competitive":
                 return self._write_obs_competitive(company_id, filed_at, payload, extracted)
             elif actual_type == "employee":
-                return self._write_obs_employee(company_id, filed_at, payload, extracted)
+                return self._write_obs_org_events(company_id, filed_at, payload, extracted)
 
         return ""
 
@@ -409,19 +409,41 @@ class Extractor:
         row = result.fetchone()
         return str(row[0]) if row else ""
 
-    def _write_obs_employee(
+    def _write_obs_org_events(
         self, company_id: str | None, filed_at: str, payload: dict, data: dict
     ) -> str:
+        """Write to obs_org_events (replaces old obs_employee table)."""
         from sqlalchemy import text
         emp = data.get("employee") or {}
+        person_title = emp.get("person_title", "")
+        # Detect strategic roles that signal intent
+        strategic_titles = {
+            "investor relations": "ipo_prep",
+            "general counsel": "ma_signal",
+            "chief accounting": "ipo_prep",
+            "corporate development": "ma_signal",
+            "chief revenue": "growth_signal",
+            "market access": "commercial_launch",
+            "regulatory affairs": "new_program",
+        }
+        is_strategic = False
+        strategic_signal = None
+        for keyword, signal in strategic_titles.items():
+            if keyword in person_title.lower():
+                is_strategic = True
+                strategic_signal = signal
+                break
+
         result = self._db.execute(
             text("""
-                INSERT INTO global.obs_employee (
+                INSERT INTO global.obs_org_events (
                     company_id, observed_at, source_id, confidence, status,
-                    signal_type, headline, detail, department, metadata
+                    signal_type, headline, detail, person_name, person_title,
+                    department, is_strategic, strategic_signal, metadata
                 ) VALUES (
                     :company_id, :observed_at, 'edgar', 0.9, 'active',
-                    :signal_type, :headline, :detail, :department, :metadata::jsonb
+                    :signal_type, :headline, :detail, :person_name, :person_title,
+                    :department, :is_strategic, :strategic_signal, :metadata::jsonb
                 )
                 RETURNING id
             """),
@@ -431,11 +453,13 @@ class Extractor:
                 "signal_type": emp.get("signal_type", "org_change"),
                 "headline": data.get("headline", ""),
                 "detail": data.get("detail", ""),
+                "person_name": emp.get("person_name"),
+                "person_title": person_title,
                 "department": emp.get("department"),
+                "is_strategic": is_strategic,
+                "strategic_signal": strategic_signal,
                 "metadata": json.dumps({
                     "accession_no": payload.get("accession_no"),
-                    "person_name": emp.get("person_name"),
-                    "person_title": emp.get("person_title"),
                 }),
             },
         )

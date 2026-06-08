@@ -22,14 +22,29 @@ providers:
 models:
 
   extraction:
-    # Job: parse raw SEC filing / news article → structured observation fields
-    # Volume: highest — runs on every ingested document
-    # Need: fast, cheap, instruction-following. Quality matters less than throughput.
+    # Job: parse raw SEC filing → structured observation fields
+    # Volume: highest — runs on every ingested EDGAR document
+    # Need: fast, cheap, instruction-following.
     # Choice: llama-3.1-8b-instant — 560 t/s, 14,400 RPD free. Highest daily headroom.
-    description: "Parse raw content into structured observations"
+    description: "Parse raw SEC filings into structured observations"
     provider: "groq"
     model: "llama-3.1-8b-instant"
     max_tokens: 500
+    temperature: 0.1
+    rate_limit_rpm: 30
+    rate_limit_rpd: 14400
+
+  news_extraction:
+    # Job: classify news articles + extract signals (competitive, customer, org, financial)
+    # Volume: high — runs on every news article per tracked company per day
+    # Need: accurate classification across multiple obs types; slightly harder than EDGAR
+    #       because news is unstructured and ambiguous. Same model for now — swap to
+    #       qwen/qwen3-32b here if classification accuracy needs improvement.
+    # To upgrade: change model to "qwen/qwen3-32b" — nothing else changes.
+    description: "Classify news articles and extract structured signals"
+    provider: "groq"
+    model: "llama-3.1-8b-instant"
+    max_tokens: 600
     temperature: 0.1
     rate_limit_rpm: 30
     rate_limit_rpd: 14400
