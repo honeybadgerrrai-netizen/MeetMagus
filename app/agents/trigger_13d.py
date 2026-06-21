@@ -162,7 +162,7 @@ class WarmPathEngine:
 
     Data flow:
       tenant.contacts (banker's network)
-        ↓ linked_person_id
+        ↓ person_id
       global.people
         ↓ affiliations
       global.affiliations (company roles)
@@ -202,18 +202,20 @@ class WarmPathEngine:
             text("""
                 SELECT
                     c.id            AS contact_id,
-                    c.name          AS contact_name,
+                    p.full_name     AS contact_name,
                     c.relationship_score,
                     a.id            AS affiliation_id,
                     a.role_type,
                     a.title
-                FROM   tenant_{banker_id_schema}.contacts c
+                FROM   {banker_id_schema}.contacts c
+                JOIN   global.people p
+                       ON p.id = c.person_id
                 JOIN   global.affiliations a
-                       ON a.person_id = c.linked_person_id
+                       ON a.person_id = c.person_id
                 WHERE  c.banker_id   = :banker_id
                   AND  a.company_id  = :company_id
                   AND  a.is_current  = true
-                  AND  c.linked_person_id IS NOT NULL
+                  AND  c.person_id IS NOT NULL
                 ORDER BY c.relationship_score DESC
                 LIMIT 10
             """.replace("{banker_id_schema}", self._tenant_schema(banker_id))),
@@ -245,16 +247,18 @@ class WarmPathEngine:
             text("""
                 SELECT
                     c.id                AS contact_id,
-                    c.name              AS contact_name,
+                    p1.full_name        AS contact_name,
                     c.relationship_score,
-                    p2.name             AS intermediate_name,
+                    p2.full_name        AS intermediate_name,
                     a2.id               AS affiliation_id,
                     a2.role_type,
                     a2.title,
-                    shared.company_name AS shared_via
-                FROM   tenant_{schema}.contacts c
+                    shared.name         AS shared_via
+                FROM   {schema}.contacts c
+                JOIN   global.people p1
+                       ON p1.id = c.person_id
                 JOIN   global.affiliations a1
-                       ON a1.person_id = c.linked_person_id AND a1.is_current = true
+                       ON a1.person_id = c.person_id AND a1.is_current = true
                 JOIN   global.affiliations a1b
                        ON a1b.company_id = a1.company_id
                        AND a1b.person_id != a1.person_id
@@ -266,7 +270,7 @@ class WarmPathEngine:
                 JOIN   global.people p2 ON p2.id = a1b.person_id
                 JOIN   global.companies shared ON shared.id = a1.company_id
                 WHERE  c.banker_id = :banker_id
-                  AND  c.linked_person_id IS NOT NULL
+                  AND  c.person_id IS NOT NULL
                 ORDER BY c.relationship_score DESC
                 LIMIT 5
             """.replace("{schema}", self._tenant_schema(banker_id))),
@@ -294,10 +298,9 @@ class WarmPathEngine:
     @staticmethod
     def _tenant_schema(banker_id: str) -> str:
         """Return the tenant schema name for a banker_id."""
-        # In the deployed system, banker_id maps to tenant_id
-        # For simplicity, the schema is tenant_{banker_id} or we look it up
-        # Here we use a simplified lookup — in production, cache this mapping
-        return f"tenant_{banker_id}"
+        # The current committed schema defines one tenant schema.
+        # In production, banker_id should map to a tenant record or schema view.
+        return "tenant_1"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,8 +329,8 @@ class CapabilityMatcher:
     Scores a banker's capabilities against an activist 13D scenario.
 
     Matching logic:
-      - Keywords in capability name/description → relevance score
-      - Sector overlap between capability and target company → bonus
+      - Keywords in capability description/evidence/counterparty/role → relevance score
+      - Industry overlap between capability metadata and target company → bonus
       - Higher score = stronger argument for the banker to reach out
     """
 
@@ -375,7 +378,8 @@ class CapabilityMatcher:
         """Return (score, reason_string) for a capability against this scenario."""
         text = (
             f"{cap.get('name', '')} {cap.get('description', '')} "
-            f"{cap.get('category', '')}"
+            f"{cap.get('category', '')} {cap.get('evidence', '')} "
+            f"{cap.get('counterparty', '')} {cap.get('role', '')}"
         ).lower()
 
         score = 0.0
@@ -411,26 +415,72 @@ class CapabilityMatcher:
         schema = WarmPathEngine._tenant_schema(banker_id)
         rows = self._db.execute(
             text(f"""
-                SELECT id, name, category, description, sector_focus, scope
+                SELECT
+                    id, capability_type, description, evidence_deal,
+                    counterparty, role, metadata
                 FROM {schema}.capabilities
-                WHERE banker_id = :banker_id OR scope = 'firm'
-                ORDER BY scope DESC, id ASC
+                WHERE banker_id = :banker_id OR capability_type = 'firm'
+                ORDER BY capability_type DESC, id ASC
             """),
             {"banker_id": banker_id},
         ).fetchall()
-        return [
-            {"id": r[0], "name": r[1], "category": r[2],
-             "description": r[3], "sector_focus": r[4], "scope": r[5]}
-            for r in rows
-        ]
+        capabilities = []
+        for r in rows:
+            metadata = r[6] or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    metadata = {}
+
+            evidence = r[3] or ""
+            description = r[2] or ""
+            cap_type = r[1] or ""
+            name = evidence or description[:80] or cap_type or "Banker capability"
+            category = metadata.get("category") or cap_type
+            sector_focus = (
+                metadata.get("sector_focus")
+                or metadata.get("industry")
+                or metadata.get("sub_industry")
+                or ""
+            )
+
+            capabilities.append({
+                "id": r[0],
+                "name": name,
+                "category": category,
+                "description": description,
+                "evidence": evidence,
+                "counterparty": r[4] or "",
+                "role": r[5] or "",
+                "sector_focus": sector_focus,
+                "scope": cap_type,
+            })
+        return capabilities
 
     def _fetch_company_sector(self, company_id: str) -> str:
         from sqlalchemy import text
         row = self._db.execute(
-            text("SELECT sector FROM global.companies WHERE id = :id LIMIT 1"),
+            text("""
+                SELECT sub_industry, industry, metadata
+                FROM global.companies
+                WHERE id = :id
+                LIMIT 1
+            """),
             {"id": company_id},
         ).fetchone()
-        return row[0] if row else ""
+        if not row:
+            return ""
+        metadata = row[2] or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        metadata_sector = ""
+        if isinstance(metadata, dict):
+            metadata_sector = metadata.get("sector") or metadata.get("industry") or ""
+        return row[0] or row[1] or metadata_sector or ""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -913,7 +963,7 @@ class TriggerAgent13D:
                     relevance_score, status
                 ) VALUES (
                     :banker_id, 'activist_13d', :title, :body,
-                    :sources::jsonb, :company_id,
+                    CAST(:sources AS jsonb), :company_id,
                     :score, 'unread'
                 )
                 RETURNING id
